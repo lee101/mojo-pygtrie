@@ -16,6 +16,7 @@ I = ctypes.c_int64
 _SIGNATURES = {
     "mpg_fill_i64": ([I] * 3, None),
     "mpg_grow_i64": ([I] * 5, None),
+    "mpg_rehash": ([I] * 8, None),
     "mpg_find": ([I] * 6, I),
     "mpg_insert": ([I] * 14, I),
     "mpg_bulk_insert": ([I] * 16, None),

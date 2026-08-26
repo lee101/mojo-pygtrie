@@ -65,6 +65,7 @@ class Trie(collections.abc.MutableMapping):
     HAS_VALUE = 1
     HAS_SUBTRIE = 2
     _raw_keys_are_cache_keys = False
+    _INSERT_CHUNK = 8192
 
     def __init__(self, *args, **kwargs):
         self._sorted = False
@@ -81,13 +82,14 @@ class Trie(collections.abc.MutableMapping):
             self._generation += 1
         self._node_by_path = {}
         capacity = 16
-        self._first = _i64_filled(capacity, -1)
-        self._last = _i64_filled(capacity, -1)
-        self._parent = _i64_filled(capacity, -1)
-        self._parent_token = _i64_filled(capacity, -1)
-        self._edge_token = _i64_filled(capacity, -1)
-        self._edge_child = _i64_filled(capacity, -1)
-        self._edge_next = _i64_filled(capacity, -1)
+        self._first = np.empty(capacity, dtype=np.int64)
+        self._last = np.empty(capacity, dtype=np.int64)
+        self._parent = np.empty(capacity, dtype=np.int64)
+        self._parent_token = np.empty(capacity, dtype=np.int64)
+        self._edge_token = np.empty(capacity, dtype=np.int64)
+        self._edge_child = np.empty(capacity, dtype=np.int64)
+        self._edge_next = np.empty(capacity, dtype=np.int64)
+        self._first[0] = self._last[0] = -1
         self._has_value = np.zeros(capacity, dtype=np.uint8)
         self._values = [_EMPTY] * capacity
         self._hash_nodes = _i64_filled(32, -1)
@@ -107,22 +109,35 @@ class Trie(collections.abc.MutableMapping):
             grown[array.size :] = fill
         return grown
 
+    @staticmethod
+    def _resize_active_i64(array, size, active):
+        grown = np.empty(size, dtype=np.int64)
+        if active:
+            lib().mpg_grow_i64(addr(array), addr(grown), active, active, 0)
+        return grown
+
     def _ensure_capacity(self, maximum_new_edges):
         needed = int(self._state[1]) + maximum_new_edges
         if needed > self._edge_token.size:
             size = max(needed, self._edge_token.size * 2)
-            self._edge_token = self._grow(self._edge_token, size, -1)
-            self._edge_child = self._grow(self._edge_child, size, -1)
-            self._edge_next = self._grow(self._edge_next, size, -1)
+            active = int(self._state[1])
+            self._edge_token = self._resize_active_i64(self._edge_token, size, active)
+            self._edge_child = self._resize_active_i64(self._edge_child, size, active)
+            self._edge_next = self._resize_active_i64(self._edge_next, size, active)
         node_needed = int(self._state[0]) + maximum_new_edges
         if node_needed > self._first.size:
             old = self._first.size
             size = max(node_needed, old * 2)
-            self._first = self._grow(self._first, size, -1)
-            self._last = self._grow(self._last, size, -1)
-            self._parent = self._grow(self._parent, size, -1)
-            self._parent_token = self._grow(self._parent_token, size, -1)
-            self._has_value = self._grow(self._has_value, size, 0)
+            active = int(self._state[0])
+            self._first = self._resize_active_i64(self._first, size, active)
+            self._last = self._resize_active_i64(self._last, size, active)
+            self._parent = self._resize_active_i64(self._parent, size, active)
+            self._parent_token = self._resize_active_i64(
+                self._parent_token, size, active
+            )
+            has_value = np.zeros(size, dtype=np.uint8)
+            has_value[:active] = self._has_value[:active]
+            self._has_value = has_value
             self._values.extend([_EMPTY] * (size - old))
         if (self._hash_used + maximum_new_edges) * 10 >= self._hash_nodes.size * 7:
             size = self._hash_nodes.size
@@ -134,25 +149,19 @@ class Trie(collections.abc.MutableMapping):
         nodes = _i64_filled(capacity, -1)
         tokens = _i64_filled(capacity, -1)
         children = _i64_filled(capacity, -1)
-        used = 0
-        stack = [0]
-        while stack:
-            node = stack.pop()
-            edge = int(self._first[node])
-            while edge >= 0:
-                token = int(self._edge_token[edge])
-                child = int(self._edge_child[edge])
-                slot = (node * 1000003 + token * 9176) & (capacity - 1)
-                while nodes[slot] >= 0:
-                    slot = (slot + 1) & (capacity - 1)
-                nodes[slot], tokens[slot], children[slot] = node, token, child
-                used += 1
-                stack.append(child)
-                edge = int(self._edge_next[edge])
+        lib().mpg_rehash(
+            addr(self._hash_nodes),
+            addr(self._hash_tokens),
+            addr(self._hash_children),
+            self._hash_nodes.size,
+            addr(nodes),
+            addr(tokens),
+            addr(children),
+            capacity,
+        )
         self._hash_nodes = nodes
         self._hash_tokens = tokens
         self._hash_children = children
-        self._hash_used = used
 
     def _path_from_key(self, key):
         return key
@@ -196,6 +205,11 @@ class Trie(collections.abc.MutableMapping):
                 append(token)
         offsets[-1] = len(flat)
         return np.asarray(flat, dtype=np.int64), offsets
+
+    def _encode_pairs(self, pairs):
+        paths = [self._path(key) for key, _ in pairs]
+        flat, offsets = self._encode_paths(paths, create=True)
+        return paths, flat, offsets
 
     def _encode(self, key, create=False):
         path = self._path(key)
@@ -289,37 +303,51 @@ class Trie(collections.abc.MutableMapping):
     def _set_many(self, pairs):
         if not pairs:
             return
-        paths = [self._path(key) for key, _ in pairs]
-        flat, offsets = self._encode_paths(paths, create=True)
-        self._ensure_capacity(flat.size)
+        paths, flat, offsets = self._encode_pairs(pairs)
         result = np.empty(len(pairs), dtype=np.int64)
         # All-empty paths have no token storage, but the Mojo ABI uses
         # non-nullable pointers even when every [start, stop) range is empty.
         ffi_flat = flat if flat.size else np.zeros(1, dtype=np.int64)
-        old_edges = int(self._state[1])
-        lib().mpg_bulk_insert(
-            addr(self._hash_nodes),
-            addr(self._hash_tokens),
-            addr(self._hash_children),
-            self._hash_nodes.size,
-            addr(self._first),
-            addr(self._last),
-            addr(self._edge_token),
-            addr(self._edge_child),
-            addr(self._edge_next),
-            addr(self._parent),
-            addr(self._parent_token),
-            addr(self._state),
-            addr(ffi_flat),
-            addr(offsets),
-            len(pairs),
-            addr(result),
-        )
-        self._hash_used += int(self._state[1]) - old_edges
-        for node, path, (key, value) in zip(result, paths, pairs):
-            node = int(node)
-            self._node_by_path[self._cache_key(key, path)] = node
-            self._assign_node(node, value)
+        for start in range(0, len(pairs), self._INSERT_CHUNK):
+            stop = min(start + self._INSERT_CHUNK, len(pairs))
+            maximum_new_edges = int(offsets[stop] - offsets[start])
+            self._ensure_capacity(maximum_new_edges)
+            old_edges = int(self._state[1])
+            lib().mpg_bulk_insert(
+                addr(self._hash_nodes),
+                addr(self._hash_tokens),
+                addr(self._hash_children),
+                self._hash_nodes.size,
+                addr(self._first),
+                addr(self._last),
+                addr(self._edge_token),
+                addr(self._edge_child),
+                addr(self._edge_next),
+                addr(self._parent),
+                addr(self._parent_token),
+                addr(self._state),
+                addr(ffi_flat),
+                addr(offsets[start:]),
+                stop - start,
+                addr(result[start:]),
+            )
+            self._hash_used += int(self._state[1]) - old_edges
+        unique_nodes = np.unique(result)
+        new_nodes = unique_nodes[self._has_value[unique_nodes] == 0]
+        self._has_value[new_nodes] = 1
+        self._size += len(new_nodes)
+        values = self._values
+        cache = self._node_by_path
+        if paths is None:
+            for node, (key, value) in zip(result, pairs):
+                node = int(node)
+                cache[key] = node
+                values[node] = value
+        else:
+            for node, path, (key, value) in zip(result, paths, pairs):
+                node = int(node)
+                cache[self._cache_key(key, path)] = node
+                values[node] = value
 
     def update(self, *args, **kwargs):
         if len(args) > 1:
@@ -937,6 +965,45 @@ class StringTrie(Trie):
 
     def _path_from_key(self, key):
         return key.split(self._separator)
+
+    def _encode_pairs(self, pairs):
+        offsets = np.empty(len(pairs) + 1, dtype=np.int64)
+        flat = []
+        append = flat.append
+        extend = flat.extend
+        token_by_step = self._token_by_step
+        step_by_token = self._step_by_token
+        separator = self._separator
+        previous_parent = None
+        previous_parent_tokens = []
+        for index, (key, _) in enumerate(pairs):
+            offsets[index] = len(flat)
+            parent, found, leaf = key.rpartition(separator)
+            if found and parent == previous_parent:
+                extend(previous_parent_tokens)
+                token = token_by_step.get(leaf, -1)
+                if token < 0:
+                    token = len(step_by_token)
+                    token_by_step[leaf] = token
+                    step_by_token.append(leaf)
+                append(token)
+                continue
+            steps = key.split(separator)
+            previous_parent = parent if found else None
+            previous_parent_tokens = []
+            cache_parent = bool(found)
+            step_count = len(steps)
+            for position, step in enumerate(steps):
+                token = token_by_step.get(step, -1)
+                if token < 0:
+                    token = len(step_by_token)
+                    token_by_step[step] = token
+                    step_by_token.append(step)
+                append(token)
+                if cache_parent and position + 1 < step_count:
+                    previous_parent_tokens.append(token)
+        offsets[-1] = len(flat)
+        return None, np.asarray(flat, dtype=np.int64), offsets
 
     def _cache_key(self, key, path):
         return key

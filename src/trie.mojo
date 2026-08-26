@@ -50,6 +50,37 @@ def mpg_grow_i64(
         index += 1
 
 
+@export("mpg_rehash")
+def mpg_rehash(
+    old_nodes_addr: Int,
+    old_tokens_addr: Int,
+    old_children_addr: Int,
+    old_capacity: Int,
+    new_nodes_addr: Int,
+    new_tokens_addr: Int,
+    new_children_addr: Int,
+    new_capacity: Int,
+) abi("C"):
+    var old_nodes = IPtr(unsafe_from_address=old_nodes_addr)
+    var old_tokens = IPtr(unsafe_from_address=old_tokens_addr)
+    var old_children = IPtr(unsafe_from_address=old_children_addr)
+    var new_nodes = IPtr(unsafe_from_address=new_nodes_addr)
+    var new_tokens = IPtr(unsafe_from_address=new_tokens_addr)
+    var new_children = IPtr(unsafe_from_address=new_children_addr)
+    for old_slot in range(old_capacity):
+        var node = old_nodes.load(old_slot)
+        if node >= 0:
+            add_hash_edge(
+                new_nodes,
+                new_tokens,
+                new_children,
+                new_capacity,
+                node,
+                old_tokens.load(old_slot),
+                old_children.load(old_slot),
+            )
+
+
 def hash_index(node: Int64, token: Int64, capacity: Int) -> Int:
     return Int((node * 1000003 + token * 9176) & Int64(capacity - 1))
 

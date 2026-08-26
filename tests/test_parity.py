@@ -289,6 +289,30 @@ def test_simd_fill_and_grow_scalar_tails():
     assert grown.tolist() == list(range(19)) + [-11] * 4
 
 
+def test_bulk_construction_across_insertion_chunk_boundary():
+    count = mojo.Trie._INSERT_CHUNK + 17
+    pairs = [(f"shared/prefix/{index}", index) for index in range(count)]
+    trie = mojo.StringTrie(pairs)
+    assert len(trie) == count
+    assert trie[pairs[0][0]] == 0
+    assert trie[pairs[-1][0]] == count - 1
+    assert trie.items() == upstream.StringTrie(pairs).items()
+
+
+def test_bulk_string_construction_parent_reuse_and_duplicates():
+    pairs = [
+        ("a::b::one", 1),
+        ("a::b::two", 2),
+        ("x::one", 3),
+        ("a::b::one", 4),
+        ("x::two", 5),
+    ]
+    got = mojo.StringTrie(pairs, separator="::")
+    expected = upstream.StringTrie(pairs, separator="::")
+    assert got.items() == expected.items()
+    assert len(got) == len(expected)
+
+
 def test_cached_exact_lookup_is_invalidated_by_pruning():
     trie = mojo.StringTrie({"a/b": 1, "a/c": 2})
     assert trie.bulk_get(["a/b", "a/c"]) == [1, 2]

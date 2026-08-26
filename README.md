@@ -73,22 +73,24 @@ currently publish wheels or promise a system-wide `pip install`.
 
 Measured with `pixi run bench` on an Intel Xeon E5-2697 v4 at 2.30 GHz,
 Linux 6.8.0-136-generic, Python 3.13.14, Mojo
-1.0.0b3.dev2026072406. Times are the best of three runs.
+1.1.0.dev2026081105. Times are the best of three runs.
 
 | workload | mojo-pygtrie | pygtrie 2.5.0 | result |
 | --- | ---: | ---: | ---: |
-| construct 100k-key StringTrie | 345.22 ms | 172.58 ms | 2.00x slower |
-| 50k scalar exact lookups | 39.00 ms | 83.70 ms | 2.15x faster |
-| 50k bulk exact, raw keys | 13.58 ms | 83.70 ms | 6.16x faster |
-| 50k bulk exact, compiled keys | 18.33 ms | 83.70 ms | 4.57x faster |
-| 50k longest-prefix, compiled keys | 50.02 ms | 226.10 ms | 4.52x faster |
-| iterate 100k values | 32.65 ms | 45.19 ms | 1.38x faster |
+| construct 100k-key StringTrie | 219.00 ms | 150.58 ms | 1.45x slower |
+| 50k scalar exact lookups | 36.72 ms | 72.65 ms | 1.98x faster |
+| 50k bulk exact, raw keys | 10.07 ms | 72.65 ms | 7.22x faster |
+| 50k bulk exact, compiled keys | 8.84 ms | 72.65 ms | 8.22x faster |
+| 50k longest-prefix, compiled keys | 34.51 ms | 170.62 ms | 4.94x faster |
+| iterate 100k values | 12.64 ms | 25.65 ms | 2.03x faster |
 
 Exact StringTrie and CharTrie lookups use an exact-key-to-node cache, while
 uncached structural queries and compiled batches use Mojo traversal. Batch
 packing builds one contiguous NumPy token buffer instead of allocating an array
-per key. Construction-time integer buffer fills and growth copies use native
-SIMD with scalar remainder handling.
+per key. Construction reuses adjacent encoded parent paths, inserts in bounded
+chunks, and rehashes natively so capacity follows actual trie growth. Integer
+buffer fills and live-slot growth copies use native SIMD with scalar remainder
+handling; unused structural capacity is left uninitialized.
 
 There is no GPU path. Trie traversal performs a few dependent hash-table probes
 per component and moves far more data than it computes, so its arithmetic
