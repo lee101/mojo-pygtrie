@@ -36,10 +36,10 @@ def mpg_grow_i64(
     comptime W = simd_width_of[DType.int64]()
     var index = 0
     while index + W <= old_length:
-        destination.store(index, source.load[width=W](index))
+        destination.store(index, source.unsafe_load[width=W](index))
         index += W
     while index < old_length:
-        destination.store(index, source.load(index))
+        destination.store(index, source.unsafe_load(index))
         index += 1
     var values = SIMD[DType.int64, W](fill)
     while index + W <= new_length:
@@ -68,7 +68,7 @@ def mpg_rehash(
     var new_tokens = IPtr(unsafe_from_address=new_tokens_addr)
     var new_children = IPtr(unsafe_from_address=new_children_addr)
     for old_slot in range(old_capacity):
-        var node = old_nodes.load(old_slot)
+        var node = old_nodes.unsafe_load(old_slot)
         if node >= 0:
             add_hash_edge(
                 new_nodes,
@@ -76,8 +76,8 @@ def mpg_rehash(
                 new_children,
                 new_capacity,
                 node,
-                old_tokens.load(old_slot),
-                old_children.load(old_slot),
+                old_tokens.unsafe_load(old_slot),
+                old_children.unsafe_load(old_slot),
             )
 
 
@@ -96,11 +96,11 @@ def find_child(
     var slot = hash_index(node, token, capacity)
     var probes = 0
     while probes < capacity:
-        var owner = hash_nodes.load(slot)
+        var owner = hash_nodes.unsafe_load(slot)
         if owner == -1:
             return -1
-        if owner == node and hash_tokens.load(slot) == token:
-            return hash_children.load(slot)
+        if owner == node and hash_tokens.unsafe_load(slot) == token:
+            return hash_children.unsafe_load(slot)
         slot = (slot + 1) & (capacity - 1)
         probes += 1
     return -1
@@ -118,7 +118,7 @@ def add_hash_edge(
     var slot = hash_index(node, token, capacity)
     var tombstone = -1
     while True:
-        var owner = hash_nodes.load(slot)
+        var owner = hash_nodes.unsafe_load(slot)
         if owner == -1:
             if tombstone >= 0:
                 slot = tombstone
@@ -141,8 +141,8 @@ def find_path(
     idx: Int,
 ) -> Int64:
     var node = Int64(0)
-    var pos = Int(offsets.load(idx))
-    var stop = Int(offsets.load(idx + 1))
+    var pos = Int(offsets.unsafe_load(idx))
+    var stop = Int(offsets.unsafe_load(idx + 1))
     while pos < stop and node >= 0:
         node = find_child(
             hash_nodes,
@@ -150,7 +150,7 @@ def find_path(
             hash_children,
             hash_capacity,
             node,
-            tokens.load(pos),
+            tokens.unsafe_load(pos),
         )
         pos += 1
     return node
@@ -168,10 +168,10 @@ def longest_path(
 ) -> Int64:
     var node = Int64(0)
     var best = Int64(-1)
-    if has_value.load(0) != 0:
+    if has_value.unsafe_load(0) != 0:
         best = 0
-    var pos = Int(offsets.load(idx))
-    var stop = Int(offsets.load(idx + 1))
+    var pos = Int(offsets.unsafe_load(idx))
+    var stop = Int(offsets.unsafe_load(idx + 1))
     while pos < stop:
         node = find_child(
             hash_nodes,
@@ -179,11 +179,11 @@ def longest_path(
             hash_children,
             hash_capacity,
             node,
-            tokens.load(pos),
+            tokens.unsafe_load(pos),
         )
         if node < 0:
             break
-        if has_value.load(Int(node)) != 0:
+        if has_value.unsafe_load(Int(node)) != 0:
             best = node
         pos += 1
     return best
@@ -208,10 +208,10 @@ def insert_path(
 ) -> Int64:
     var node = Int64(0)
     var pos = start
-    var node_count = state.load(0)
-    var edge_count = state.load(1)
+    var node_count = state.unsafe_load(0)
+    var edge_count = state.unsafe_load(1)
     while pos < stop:
-        var token = tokens.load(pos)
+        var token = tokens.unsafe_load(pos)
         var child = find_child(
             hash_nodes, hash_tokens, hash_children, hash_capacity, node, token
         )
@@ -227,7 +227,7 @@ def insert_path(
             edge_tokens.store(Int(edge), token)
             edge_children.store(Int(edge), child)
             edge_next.store(Int(edge), -1)
-            var tail = last_edge.load(Int(node))
+            var tail = last_edge.unsafe_load(Int(node))
             if tail < 0:
                 first_edge.store(Int(node), edge)
             else:
@@ -270,7 +270,7 @@ def mpg_find(
             hash_children,
             hash_capacity,
             node,
-            tokens.load(pos),
+            tokens.unsafe_load(pos),
         )
         if node < 0:
             return -1
@@ -365,8 +365,8 @@ def mpg_bulk_insert(
                 parent_tokens,
                 state,
                 tokens,
-                Int(offsets.load(idx)),
-                Int(offsets.load(idx + 1)),
+                Int(offsets.unsafe_load(idx)),
+                Int(offsets.unsafe_load(idx + 1)),
             ),
         )
 
@@ -395,7 +395,7 @@ def mpg_trace(
             hash_children,
             hash_capacity,
             node,
-            tokens.load(pos),
+            tokens.unsafe_load(pos),
         )
         if node < 0:
             return pos + 1
@@ -491,26 +491,26 @@ def mpg_collect(
     var depth = 0
     var count = 0
     while True:
-        var valued = has_value.load(Int(node)) != 0
+        var valued = has_value.unsafe_load(Int(node)) != 0
         if valued:
             result.store(count, node)
             count += 1
         var edge = Int64(-1)
         if not (shallow != 0 and valued):
-            edge = first_edge.load(Int(node))
+            edge = first_edge.unsafe_load(Int(node))
         if edge >= 0:
-            stack.store(depth, edge_next.load(Int(edge)))
+            stack.store(depth, edge_next.unsafe_load(Int(edge)))
             depth += 1
-            node = edge_children.load(Int(edge))
+            node = edge_children.unsafe_load(Int(edge))
             continue
         var found = False
         while depth > 0:
             depth -= 1
-            edge = stack.load(depth)
+            edge = stack.unsafe_load(depth)
             if edge >= 0:
-                stack.store(depth, edge_next.load(Int(edge)))
+                stack.store(depth, edge_next.unsafe_load(Int(edge)))
                 depth += 1
-                node = edge_children.load(Int(edge))
+                node = edge_children.unsafe_load(Int(edge))
                 found = True
                 break
         if not found:
